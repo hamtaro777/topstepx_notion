@@ -56,6 +56,26 @@ def extract_contract_symbol(contract_id: str) -> str:
     return contract_id
 
 
+# 契約ごとのポイント単価（1ポイントあたりのドル価値）
+CONTRACT_POINT_VALUES = {
+    "MNQ": 2.0,    # Micro E-mini Nasdaq: $2 per point
+    "MES": 5.0,    # Micro E-mini S&P 500: $5 per point
+    "NQ": 20.0,    # E-mini Nasdaq: $20 per point
+    "ES": 50.0,    # E-mini S&P 500: $50 per point
+    "MCL": 10.0,   # Micro WTI Crude Oil: $10 per point
+    "CL": 1000.0,  # WTI Crude Oil: $1000 per point
+    "MGC": 10.0,   # Micro Gold: $10 per point
+    "GC": 100.0,   # Gold: $100 per point
+    "M2K": 5.0,    # Micro E-mini Russell 2000: $5 per point
+    "MYM": 0.50,   # Micro E-mini Dow: $0.50 per point
+}
+
+
+def get_point_value(contract_symbol: str) -> float:
+    """契約シンボルからポイント単価を取得"""
+    return CONTRACT_POINT_VALUES.get(contract_symbol.upper(), 1.0)
+
+
 def format_duration(seconds: int) -> str:
     """秒数を読みやすい形式に変換"""
     if seconds < 60:
@@ -149,7 +169,7 @@ class RoundtripTransformer:
         return None
     
     def _create_roundtrip(
-        self, 
+        self,
         roundtrip_id: int,
         contract_id: str,
         entry_trade: Dict,
@@ -157,32 +177,45 @@ class RoundtripTransformer:
     ) -> Dict[str, Any]:
         """往復トレードデータを作成"""
         direction = "LONG" if entry_trade.get('side') == 0 else "SHORT"
-        
+
         entry_ts = parse_timestamp(entry_trade.get('creationTimestamp', ''))
         exit_ts = parse_timestamp(exit_trade.get('creationTimestamp', ''))
         duration_seconds = int((exit_ts - entry_ts).total_seconds())
-        
+
         entry_price = float(entry_trade.get('price', 0))
         exit_price = float(exit_trade.get('price', 0))
-        
+        size = exit_trade.get('size', 1)
+
         if direction == "LONG":
             points = exit_price - entry_price
         else:
             points = entry_price - exit_price
-        
+
         entry_fees = float(entry_trade.get('fees', 0) or 0)
         exit_fees = float(exit_trade.get('fees', 0) or 0)
         total_fees = entry_fees + exit_fees
-        
-        pnl = float(exit_trade.get('profitAndLoss', 0))
+
+        # PnLの計算: Order形式の場合はポイントから計算
+        pnl_from_api = exit_trade.get('profitAndLoss')
+        is_from_order = entry_trade.get('_source') == 'order' or exit_trade.get('_source') == 'order'
+
+        if pnl_from_api is not None and pnl_from_api != 0.0 and not is_from_order:
+            # Trade/searchからの場合: APIからのPnLを使用
+            pnl = float(pnl_from_api)
+        else:
+            # Order/searchからの場合: ポイントとポイント単価から計算
+            contract_symbol = extract_contract_symbol(contract_id)
+            point_value = get_point_value(contract_symbol)
+            pnl = points * point_value * size
+
         net_pnl = pnl - total_fees
-        
+
         return {
             "roundtrip_id": roundtrip_id,
             "contract": extract_contract_symbol(contract_id),
             "contract_id": contract_id,
             "direction": direction,
-            "size": exit_trade.get('size', 1),
+            "size": size,
             "entry": {
                 "trade_id": entry_trade.get('id'),
                 "order_id": entry_trade.get('orderId'),
@@ -199,7 +232,7 @@ class RoundtripTransformer:
                 "side": "BUY" if exit_trade.get('side') == 0 else "SELL",
                 "fees": exit_fees
             },
-            "pnl": pnl,
+            "pnl": round(pnl, 2),
             "total_fees": total_fees,
             "net_pnl": round(net_pnl, 2),
             "points": round(points, 2),
