@@ -28,7 +28,7 @@ from typing import List, Dict, Any, Optional
 # 現在のスクリプトのディレクトリをパスに追加
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from topstepx_client import TopstepXClient
+from topstepx_client import TopstepXClient, is_live_account, convert_orders_to_trades
 from notion_client import NotionRoundtripClient, load_credentials
 from roundtrip_transformer import RoundtripTransformer
 
@@ -225,33 +225,56 @@ def sync_account(
 ) -> Dict[str, int]:
     """
     単一アカウントを同期
-    
+
     Returns:
         {"created": n, "skipped": m, "errors": e, "roundtrips": r}
     """
     account_id = account.get('id')
     account_name = account.get('name')
-    
+
     logger.print(f"\n📌 アカウント: {account_name} (ID: {account_id})")
-    
+
+    # LIVE口座かどうかを判定
+    use_order_api = is_live_account(account_name)
+
     # トレードを取得
     logger.print(f"   📊 過去{days}日間のトレードを取得中...")
+    if use_order_api:
+        logger.print("   🔄 LIVE口座検出: Order/search APIを使用")
+
     try:
         end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=days)
-        
-        trades = topstepx.get_trades(
-            account_id=account_id,
-            start_date=start_date,
-            end_date=end_date
-        )
-        
-        logger.print(f"   {len(trades)} 件の片道トレードを取得")
-        
+
+        if use_order_api:
+            # LIVE口座: Order/searchを使用
+            orders = topstepx.get_order_history(
+                account_id=account_id,
+                start_date=start_date,
+                end_date=end_date
+            )
+            logger.print(f"   {len(orders)} 件の約定済みオーダーを取得")
+
+            if not orders:
+                logger.print("   ⚠️ オーダーなし")
+                return {"created": 0, "skipped": 0, "errors": 0, "roundtrips": 0}
+
+            # Order形式をTrade形式に変換
+            trades = convert_orders_to_trades(orders)
+            logger.print(f"   {len(trades)} 件の片道トレードに変換")
+        else:
+            # その他の口座: Trade/searchを使用
+            trades = topstepx.get_trades(
+                account_id=account_id,
+                start_date=start_date,
+                end_date=end_date
+            )
+            logger.print(f"   {len(trades)} 件の片道トレードを取得")
+
         if not trades:
             logger.print("   ⚠️ トレードなし")
             return {"created": 0, "skipped": 0, "errors": 0, "roundtrips": 0}
-        
+
     except Exception as e:
         logger.error(f"   ❌ トレード取得エラー: {e}")
         return {"created": 0, "skipped": 0, "errors": 1, "roundtrips": 0}
@@ -532,25 +555,48 @@ def run_interactive_mode() -> int:
     # 期間を選択
     days = select_period_interactive()
     print(f"\n   過去 {days} 日間のトレードを取得します")
-    
+
+    # LIVE口座かどうかを判定
+    use_order_api = is_live_account(account_name)
+
     # トレードを取得
     print("\n📊 トレード履歴を取得中...")
+    if use_order_api:
+        print("   🔄 LIVE口座検出: Order/search APIを使用")
+
     try:
         end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=days)
-        
-        trades = topstepx.get_trades(
-            account_id=account_id,
-            start_date=start_date,
-            end_date=end_date
-        )
-        
-        print(f"   {len(trades)} 件の片道トレードを取得しました")
-        
+
+        if use_order_api:
+            # LIVE口座: Order/searchを使用
+            orders = topstepx.get_order_history(
+                account_id=account_id,
+                start_date=start_date,
+                end_date=end_date
+            )
+            print(f"   {len(orders)} 件の約定済みオーダーを取得しました")
+
+            if not orders:
+                print("\n⚠️ オーダーがありません")
+                return 0
+
+            # Order形式をTrade形式に変換
+            trades = convert_orders_to_trades(orders)
+            print(f"   {len(trades)} 件の片道トレードに変換しました")
+        else:
+            # その他の口座: Trade/searchを使用
+            trades = topstepx.get_trades(
+                account_id=account_id,
+                start_date=start_date,
+                end_date=end_date
+            )
+            print(f"   {len(trades)} 件の片道トレードを取得しました")
+
         if not trades:
             print("\n⚠️ トレードがありません")
             return 0
-        
+
     except Exception as e:
         print(f"\n❌ トレード取得エラー: {e}")
         return 1

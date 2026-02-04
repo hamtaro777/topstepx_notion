@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 # 現在のスクリプトのディレクトリをパスに追加
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from topstepx_client import TopstepXClient, format_trade
+from topstepx_client import TopstepXClient, format_trade, is_live_account, convert_orders_to_trades
 
 
 def select_account(accounts: list) -> dict:
@@ -161,43 +161,64 @@ def main():
         print(f"\n❌ アカウント取得エラー: {e}")
         return
     
+    # LIVE口座かどうかを判定
+    account_name = account.get('name', '')
+    use_order_api = is_live_account(account_name)
+
     # トレード履歴を取得（過去30日間）
     trades = []
     print("\n📊 トレード履歴を取得中（過去30日間）...")
+    if use_order_api:
+        print("   🔄 LIVE口座検出: Order/search APIを使用")
+
     try:
         end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=30)
-        
-        trades = client.get_trades(
-            account_id=account_id,
-            start_date=start_date,
-            end_date=end_date
-        )
-        
-        print(f"   {len(trades)} 件のトレードが見つかりました")
-        
+
+        if use_order_api:
+            # LIVE口座: Order/searchを使用
+            orders = client.get_order_history(
+                account_id=account_id,
+                start_date=start_date,
+                end_date=end_date
+            )
+            print(f"   {len(orders)} 件の約定済みオーダーが見つかりました")
+
+            if orders:
+                # Order形式をTrade形式に変換
+                trades = convert_orders_to_trades(orders)
+                print(f"   {len(trades)} 件の片道トレードに変換")
+        else:
+            # その他の口座: Trade/searchを使用
+            trades = client.get_trades(
+                account_id=account_id,
+                start_date=start_date,
+                end_date=end_date
+            )
+            print(f"   {len(trades)} 件のトレードが見つかりました")
+
         if trades:
             print("\n【トレード履歴】")
             print("-" * 50)
             for i, trade in enumerate(trades[:10]):  # 最初の10件を表示
                 print(f"\nTrade #{i+1}")
                 print(format_trade(trade))
-            
+
             if len(trades) > 10:
                 print(f"\n... 他 {len(trades) - 10} 件のトレード")
-            
+
             # 統計情報
             print("\n【統計情報】")
             print("-" * 50)
-            
+
             # 完了したトレード（P&Lがnullでないもの）のみ集計
             completed_trades = [t for t in trades if t.get('profitAndLoss') is not None]
-            
+
             total_pnl = sum(t.get('profitAndLoss', 0) for t in completed_trades)
             total_fees = sum(t.get('fees', 0) or 0 for t in trades)
             winning_trades = [t for t in completed_trades if t.get('profitAndLoss', 0) > 0]
             losing_trades = [t for t in completed_trades if t.get('profitAndLoss', 0) < 0]
-            
+
             print(f"  総トレード数: {len(trades)}")
             print(f"  完了トレード: {len(completed_trades)}")
             print(f"  勝ちトレード: {len(winning_trades)}")
@@ -210,23 +231,34 @@ def main():
             print(f"  純損益: ${total_pnl - total_fees:,.2f}")
         else:
             print("\n⚠️ 過去30日間のトレードはありませんでした")
-            
+
             # より長い期間を試す
             print("\n📊 過去90日間を検索中...")
             start_date = end_date - timedelta(days=90)
-            trades = client.get_trades(
-                account_id=account_id,
-                start_date=start_date,
-                end_date=end_date
-            )
+
+            if use_order_api:
+                orders = client.get_order_history(
+                    account_id=account_id,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+                if orders:
+                    trades = convert_orders_to_trades(orders)
+            else:
+                trades = client.get_trades(
+                    account_id=account_id,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+
             print(f"   {len(trades)} 件のトレードが見つかりました")
-            
+
             if trades:
                 print("\n【最新のトレード（最大10件）】")
                 for i, trade in enumerate(trades[:10]):
                     print(f"\nTrade #{i+1}")
                     print(format_trade(trade))
-            
+
     except Exception as e:
         print(f"\n❌ トレード取得エラー: {e}")
         import traceback

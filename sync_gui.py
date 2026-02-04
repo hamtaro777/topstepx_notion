@@ -42,7 +42,7 @@ from tkinter import messagebox
 # ç¾åœ¨ã®ã‚¹ã‚¯ãƒªãƒ—ãƒˆã®ãƒ‡ã‚£ãƒ¬ã‚¯ãƒˆãƒªã‚’ãƒ‘ã‚¹ã«è¿½åŠ 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from topstepx_client import TopstepXClient
+from topstepx_client import TopstepXClient, is_live_account, convert_orders_to_trades
 from notion_client import NotionRoundtripClient, load_credentials
 from roundtrip_transformer import RoundtripTransformer
 
@@ -1136,19 +1136,39 @@ class SyncApp(ctk.CTk):
             for i, account in enumerate(accounts):
                 account_id = account.get('id')
                 account_name = account.get('name')
-                
-                self.after(0, lambda n=account_name, idx=i: 
+
+                self.after(0, lambda n=account_name, idx=i:
                     self.log(f"[{idx+1}/{len(accounts)}] {n}")
                 )
-                
+
+                # LIVE口座かどうかを判定
+                use_order_api = is_live_account(account_name)
+
                 try:
-                    trades = self.topstepx.get_trades(
-                        account_id=account_id,
-                        start_date=start_date,
-                        end_date=end_date
-                    )
-                    
-                    self.after(0, lambda t=len(trades): 
+                    if use_order_api:
+                        # LIVE口座: Order/searchを使用
+                        self.after(0, lambda:
+                            self.log("  Using Order/search API (LIVE)", "info")
+                        )
+                        orders = self.topstepx.get_order_history(
+                            account_id=account_id,
+                            start_date=start_date,
+                            end_date=end_date
+                        )
+                        self.after(0, lambda o=len(orders):
+                            self.log(f"  {o} filled orders")
+                        )
+                        # Order形式をTrade形式に変換
+                        trades = convert_orders_to_trades(orders) if orders else []
+                    else:
+                        # その他の口座: Trade/searchを使用
+                        trades = self.topstepx.get_trades(
+                            account_id=account_id,
+                            start_date=start_date,
+                            end_date=end_date
+                        )
+
+                    self.after(0, lambda t=len(trades):
                         self.log(f"  {t} half-turn trades")
                     )
                     
