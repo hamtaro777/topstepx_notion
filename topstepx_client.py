@@ -39,13 +39,18 @@ class TopstepXClient:
                 f"認証情報ファイルが見つかりません: {self.credentials_path}\n"
                 f"credentials.example.json を参考に credentials.json を作成してください。"
             )
-        
+
         with open(self.credentials_path, 'r', encoding='utf-8') as f:
             creds = json.load(f)
-        
-        self.username = creds.get('username')
-        self.api_key = creds.get('api_key')
-        
+
+        # 新形式（topstepx: {username, api_key}）と旧形式（直接username, api_key）の両方に対応
+        if 'topstepx' in creds:
+            self.username = creds['topstepx'].get('username')
+            self.api_key = creds['topstepx'].get('api_key')
+        else:
+            self.username = creds.get('username')
+            self.api_key = creds.get('api_key')
+
         if not self.username or not self.api_key:
             raise ValueError("認証情報ファイルに username と api_key が必要です")
     
