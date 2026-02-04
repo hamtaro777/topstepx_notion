@@ -1,0 +1,16 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Credentials (never commit)
+credentials.json
+
+# IDE
+.vscode/
+.idea/
+
+# Data files
+trade_data_raw.json
+*_roundtrips.json
