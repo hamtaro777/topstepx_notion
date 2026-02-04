@@ -101,73 +101,179 @@ class RoundtripTransformer:
     def transform(self, trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         片道トレードを往復トレードに変換
-        
+
         Args:
             trades: TopstepX APIからの生トレードデータ
-        
+
         Returns:
             往復トレードのリスト
+
+        Note:
+            複数エントリー/一括決済にも対応：
+            - 5回の1枚BUY → 1回の5枚SELL の場合、5つのラウンドトリップを作成
+            - 1回の5枚BUY → 5回の1枚SELL の場合も、5つのラウンドトリップを作成
         """
         self.roundtrips = []
         self.open_positions = []
         self.unmatched_exits = []
-        
+
         # 契約ごとにトレードをグループ化
         trades_by_contract = defaultdict(list)
         for trade in trades:
             contract_id = trade.get('contractId', '')
             trades_by_contract[contract_id].append(trade)
-        
+
         roundtrip_id = 0
-        
+
         for contract_id, contract_trades in trades_by_contract.items():
             # 時系列でソート
             contract_trades.sort(key=lambda x: x.get('creationTimestamp', ''))
-            
+
             # エントリーとエグジットを分離
             entries = [t for t in contract_trades if t.get('profitAndLoss') is None]
             exits = [t for t in contract_trades if t.get('profitAndLoss') is not None]
-            
-            entry_queue = list(entries)
-            
+
+            # エントリーキュー（残りサイズを追跡）
+            entry_queue = []
+            for e in entries:
+                entry_queue.append({
+                    'trade': e,
+                    'remaining_size': e.get('size', 1)
+                })
+
             for exit_trade in exits:
-                if not entry_queue:
-                    self.unmatched_exits.append(exit_trade)
-                    continue
-                
-                # 対応するエントリーを探す
-                entry_trade = self._find_matching_entry(entry_queue, exit_trade)
-                
-                if entry_trade is None:
-                    entry_trade = entry_queue.pop(0)
-                
-                roundtrip_id += 1
-                roundtrip = self._create_roundtrip(
-                    roundtrip_id, contract_id, entry_trade, exit_trade
-                )
-                self.roundtrips.append(roundtrip)
-            
+                exit_side = exit_trade.get('side')
+                exit_size = exit_trade.get('size', 1)
+                remaining_exit = exit_size
+
+                while remaining_exit > 0 and entry_queue:
+                    # 反対sideのエントリーを探す（FIFO）
+                    entry_idx = None
+                    for i, eq in enumerate(entry_queue):
+                        if eq['trade'].get('side') != exit_side and eq['remaining_size'] > 0:
+                            entry_idx = i
+                            break
+
+                    if entry_idx is None:
+                        # マッチするエントリーがない
+                        break
+
+                    entry_item = entry_queue[entry_idx]
+                    entry_trade = entry_item['trade']
+                    entry_remaining = entry_item['remaining_size']
+
+                    # 消費するサイズを決定
+                    consume_size = min(entry_remaining, remaining_exit)
+
+                    # ラウンドトリップを作成
+                    roundtrip_id += 1
+                    roundtrip = self._create_roundtrip_with_size(
+                        roundtrip_id, contract_id, entry_trade, exit_trade, consume_size
+                    )
+                    self.roundtrips.append(roundtrip)
+
+                    # サイズを更新
+                    entry_item['remaining_size'] -= consume_size
+                    remaining_exit -= consume_size
+
+                    # エントリーが使い切られたらキューから削除
+                    if entry_item['remaining_size'] <= 0:
+                        entry_queue.pop(entry_idx)
+
+                if remaining_exit > 0:
+                    # マッチしなかったエグジット部分を記録
+                    unmatched = exit_trade.copy()
+                    unmatched['_unmatched_size'] = remaining_exit
+                    self.unmatched_exits.append(unmatched)
+
             # 未決済のエントリーを記録
-            self.open_positions.extend(entry_queue)
-        
+            for eq in entry_queue:
+                if eq['remaining_size'] > 0:
+                    open_pos = eq['trade'].copy()
+                    open_pos['_remaining_size'] = eq['remaining_size']
+                    self.open_positions.append(open_pos)
+
         # 時系列でソート
         self.roundtrips.sort(key=lambda x: x['exit']['timestamp'])
-        
+
         return self.roundtrips
     
-    def _find_matching_entry(
-        self, 
-        entry_queue: List[Dict], 
-        exit_trade: Dict
-    ) -> Optional[Dict]:
-        """マッチするエントリーを検索"""
-        for i, entry in enumerate(entry_queue):
-            # 反対のside、同じサイズ
-            if (entry.get('side') != exit_trade.get('side') and 
-                entry.get('size') == exit_trade.get('size')):
-                return entry_queue.pop(i)
-        return None
-    
+    def _create_roundtrip_with_size(
+        self,
+        roundtrip_id: int,
+        contract_id: str,
+        entry_trade: Dict,
+        exit_trade: Dict,
+        size: int
+    ) -> Dict[str, Any]:
+        """
+        指定サイズでの往復トレードデータを作成
+
+        Args:
+            roundtrip_id: ラウンドトリップID
+            contract_id: 契約ID
+            entry_trade: エントリートレード
+            exit_trade: エグジットトレード
+            size: このラウンドトリップのサイズ
+        """
+        direction = "LONG" if entry_trade.get('side') == 0 else "SHORT"
+
+        entry_ts = parse_timestamp(entry_trade.get('creationTimestamp', ''))
+        exit_ts = parse_timestamp(exit_trade.get('creationTimestamp', ''))
+        duration_seconds = int((exit_ts - entry_ts).total_seconds())
+
+        entry_price = float(entry_trade.get('price', 0))
+        exit_price = float(exit_trade.get('price', 0))
+
+        if direction == "LONG":
+            points = exit_price - entry_price
+        else:
+            points = entry_price - exit_price
+
+        # 手数料はサイズ比率で按分
+        entry_original_size = entry_trade.get('size', 1)
+        exit_original_size = exit_trade.get('size', 1)
+        entry_fees = float(entry_trade.get('fees', 0) or 0) * (size / entry_original_size)
+        exit_fees = float(exit_trade.get('fees', 0) or 0) * (size / exit_original_size)
+        total_fees = entry_fees + exit_fees
+
+        # PnLの計算: ポイントとポイント単価から計算
+        contract_symbol = extract_contract_symbol(contract_id)
+        point_value = get_point_value(contract_symbol)
+        pnl = points * point_value * size
+
+        net_pnl = pnl - total_fees
+
+        return {
+            "roundtrip_id": roundtrip_id,
+            "contract": contract_symbol,
+            "contract_id": contract_id,
+            "direction": direction,
+            "size": size,
+            "entry": {
+                "trade_id": entry_trade.get('id'),
+                "order_id": entry_trade.get('orderId'),
+                "timestamp": entry_trade.get('creationTimestamp'),
+                "price": entry_price,
+                "side": "BUY" if entry_trade.get('side') == 0 else "SELL",
+                "fees": round(entry_fees, 2)
+            },
+            "exit": {
+                "trade_id": exit_trade.get('id'),
+                "order_id": exit_trade.get('orderId'),
+                "timestamp": exit_trade.get('creationTimestamp'),
+                "price": exit_price,
+                "side": "BUY" if exit_trade.get('side') == 0 else "SELL",
+                "fees": round(exit_fees, 2)
+            },
+            "pnl": round(pnl, 2),
+            "total_fees": round(total_fees, 2),
+            "net_pnl": round(net_pnl, 2),
+            "points": round(points, 2),
+            "duration_seconds": duration_seconds,
+            "duration_formatted": format_duration(duration_seconds)
+        }
+
     def _create_roundtrip(
         self,
         roundtrip_id: int,
